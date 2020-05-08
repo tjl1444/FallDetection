@@ -39,19 +39,28 @@
 
 /************************* Structs ****************************************************************/
 typedef struct {
-
   float roll;
   float pitch;
 
 } Imu_rotation;
 
 typedef struct {
-
   float x;
   float y;
   float z;
 
 } Imu_accel;
+
+/************************* Enums ****************************************************************/
+enum States {
+  stateMeasureAccel,
+  stateSetTriggers,
+  stateResetTriggers,
+  stateCheckSignal,
+  stateCheckOrientation,
+  stateFallDetected
+
+};
 
 /************************* Function Prototypes ****************************************************/
 Imu_accel ReadAccel();
@@ -65,7 +74,8 @@ float CalcPkPk();
 float FilterLowPass(float new_input, float old_output);
 uint16_t GetBufferPosition(uint16_t current_pos, int8_t samples);
 
-/************************* Main ****************************************************/
+/************************* Global Variables ***********************************************/
+States mState;
 Imu_rotation tilt[BUFFER_LEN];
 Imu_rotation current_orientation;
 
@@ -79,9 +89,10 @@ int16_t tilt_trigger = MAX_INT16;
 float y_rotF = 0.0;
 float z_rotF = 0.0;
 
-/* Assign a unique ID to ADXL345 */
-Adafruit_ADXL345_Unified adxl = Adafruit_ADXL345_Unified(12345);
+unsigned long current_time;
+Adafruit_ADXL345_Unified adxl = Adafruit_ADXL345_Unified(1);
 
+/************************* Main ****************************************************/
 void setup() {
 
   Serial.begin(115200);
@@ -95,11 +106,10 @@ void setup() {
 
   /* Initialise the ADXL345 */
   while (!adxl.begin()) {
-  
     /* Flash the LED a couple of times times then try again */
     blinkLED();
-
   }
+
   // Initialise ADXL345 parameters
   adxl.setRange(ADXL345_RANGE_16_G);
   adxl.setDataRate(ADXL345_DATARATE_25_HZ);
@@ -109,40 +119,64 @@ void setup() {
   tilt[buffer_index] = CalcTilt(&initAccel);
   buffer_index++;
 
+  current_time = millis();
+
+  // Start measuring accel 
+  mState = stateMeasureAccel;
+
 }
 
 
 void loop() {
+  
+  
+  switch(mState) {
 
-  Imu_accel accel = ReadAccel();
-  unsigned long current_time = millis();
+  case stateMeasureAccel:
+  {
+    // Wait 40ms until next sample
+    while((unsigned long)(millis() - current_time) <= SAMPLE_TIME_MS);
+    Imu_accel accel = ReadAccel();
+    current_time = millis();
 
-  // Calculate Horizontal acceleration vector magnitude
-  float accel_mag = CalcHoriz_Mag(&accel);
+    // Calculate Horizontal acceleration vector magnitude
+    float accel_mag = CalcHoriz_Mag(&accel);
 
-  if (buffer_index > accel_trigger + 50) {
-    vector_mag[mag_index] = accel_mag;
-    mag_index++;
+    if (buffer_index > accel_trigger + 50) {
+        vector_mag[mag_index] = accel_mag;
+        mag_index++;
+    }
+
+    // Get Current roll/pitch angles
+    Imu_rotation filteredTilt;
+    Imu_rotation currentTilt = CalcTilt(&accel);
+
+    // Apply Low Pass IIR Filter to roll/pitch angles
+    y_rotF = FilterLowPass(currentTilt.pitch, y_rotF);
+    z_rotF = FilterLowPass(currentTilt.roll, z_rotF);
+    filteredTilt.roll = z_rotF;
+    filteredTilt.pitch = y_rotF;
+    tilt[buffer_index] = filteredTilt;
+
+    /* ------------ DEBUG Roll and Pitch  ------------*/
+    Serial.print(tilt[buffer_index].pitch); Serial.print(" ");
+    Serial.println(tilt[buffer_index].roll);
+
+    // Check if acceleration above the threshold
+    if (accel_mag > ACCEL_THRESHOLD) {
+      mState = stateSetTriggers;
+    }
+
+    // Check if enough time has passed after the fall trigger
+    if (buffer_index == tilt_trigger) {
+      mState = stateCheckSignal;
+    }
+
+    break;
   }
 
-  // Get Current roll/pitch angles
-  Imu_rotation filteredTilt;
-  Imu_rotation currentTilt = CalcTilt(&accel);
-
-  // Apply Low Pass IIR Filter to roll/pitch angles
-  y_rotF = FilterLowPass(currentTilt.pitch, y_rotF);
-  z_rotF = FilterLowPass(currentTilt.roll, z_rotF);
-  filteredTilt.roll = z_rotF;
-  filteredTilt.pitch = y_rotF;
-  tilt[buffer_index] = filteredTilt;
-
-  /* ------------ DEBUG Roll and Pitch  ------------*/
-  Serial.print(tilt[buffer_index].pitch); Serial.print(" ");
-  Serial.println(tilt[buffer_index].roll);
-
-  // Check if acceleration above the threshold
-  if (accel_mag > ACCEL_THRESHOLD) {
-    
+  case stateSetTriggers:
+  {
     mag_index = 0;
     accel_trigger = buffer_index;
     tilt_trigger = GetBufferPosition(accel_trigger, 60);
@@ -156,58 +190,86 @@ void loop() {
     Serial.print("Current Orientation is (Forward/Backward | Left/Right: ");
     Serial.print(current_orientation.pitch); Serial.print(" ");
     Serial.println(current_orientation.roll);
+
+    // Go back to measuring the accel
+    mState = stateMeasureAccel;
+    break;
   }
 
-  // Check if enough time has passed after the fall trigger
-  if (buffer_index == tilt_trigger) {
-    
-    // Check if signal has settled and calculate the change in orientation
+  case stateCheckSignal:
+  {
     if (CalcPkPk() < SETTLE_THRESHOLD) {
-      // Check change in orientation and send message on serial monitor that a fall has occured
+      /* ------------------------ DEBUG   ------------------------*/
       Serial.println("Signal has settled, check change in orientation");
 
-      uint16_t index = GetBufferPosition(buffer_index, -10);
-      Imu_rotation new_orientation = AverageRotation(index, 10);
-
-      /* ------------ DEBUG Roll and Pitch after High Accel  ------------*/
-      Serial.print("New Orientation is (Forward/Backward | Left/Right: ");
-      Serial.print(new_orientation.pitch); Serial.print(" ");
-      Serial.println(new_orientation.roll);
-
-      float orientation_change; 
-      float roll_change = abs(new_orientation.roll - current_orientation.roll);
-      float pitch_change = abs(new_orientation.pitch - current_orientation.pitch);
-      
-      if (pitch_change > roll_change) {
-        orientation_change = pitch_change;
-      }else {
-        orientation_change = roll_change;
-      }
-
-      if (orientation_change > ANGLE_THRESHOLD) {
-        // Fall Detected - Blink the LED
-        blinkLED();
-        Serial.println("Fall Detected");
-      }
+      mState = stateCheckOrientation;
     }
+    else {
+      // No Fall Detected so reset the trigger points
+      mState = stateResetTriggers;
+    }
+    break;
+  }
 
-    // Reset trigger points
+  case stateResetTriggers:
+  {
     mag_index = 0;
     tilt_trigger = MAX_INT16;
     accel_trigger = MAX_UINT16;
+
+    // Continue measuring accel
+    mState = stateMeasureAccel;
+    break;
   }
 
-  buffer_index = GetBufferPosition(buffer_index, 1);
+  case stateCheckOrientation:
+  {
+    uint16_t index = GetBufferPosition(buffer_index, -10);
+    Imu_rotation new_orientation = AverageRotation(index, 10);
 
-  // Wait 40ms until next sample
-  while((unsigned long)(millis() - current_time) <= SAMPLE_TIME_MS);
+    /* ------------ DEBUG Roll and Pitch after High Accel  ------------*/
+    Serial.print("New Orientation is (Forward/Backward | Left/Right: ");
+    Serial.print(new_orientation.pitch); Serial.print(" ");
+    Serial.println(new_orientation.roll);
+
+    float orientation_change; 
+    float roll_change = abs(new_orientation.roll - current_orientation.roll);
+    float pitch_change = abs(new_orientation.pitch - current_orientation.pitch);
+    
+    if (pitch_change > roll_change) {
+      orientation_change = pitch_change;
+    }else {
+      orientation_change = roll_change;
+    }
+
+    if (orientation_change > ANGLE_THRESHOLD) {
+      // Fall has been detected
+      mState = stateFallDetected;
+    }else {
+      // Fall not detected due to low change in orientation
+      mState = stateResetTriggers;
+    }
+
+    break;
+  }
+
+  case stateFallDetected:
+  {
+    blinkLED();
+    Serial.println("Fall Detected");
+    mState = stateResetTriggers;
+    break;
+  }
+
+  }
+
+  // Get next buffer index
+  buffer_index = GetBufferPosition(buffer_index, 1);
   
 }
 
-
 /************************* Functions ***********************************************/
 Imu_rotation AverageRotation(uint16_t start_index, uint8_t samples) {
-
   Imu_rotation average_rot = {0.0, 0.0};
   uint8_t i = 0;
   
@@ -220,6 +282,7 @@ Imu_rotation AverageRotation(uint16_t start_index, uint8_t samples) {
   average_rot.roll = average_rot.roll / samples;
   average_rot.pitch = average_rot.pitch / samples;
   return average_rot;
+  
 }
 
 
@@ -238,37 +301,35 @@ Imu_accel ReadAccel() {
 
 
 float CalcHoriz_Mag(Imu_accel* accel) {
-
   float horiz_mag = sqrt((accel->y * accel->y) + (accel->z * accel->z));
   return horiz_mag;
 }
 
 
 float CalcRoll(Imu_accel* accel) {
-  
   float z_rot = atan(-1 * accel->y / sqrt(pow(accel->x, 2) + pow(accel->z, 2))) * 180 / PI;
   return z_rot;
+
 }
 
 
 float CalcPitch(Imu_accel* accel) {
-
   float y_rot = atan(-1 * accel->z / sqrt(pow(accel->x, 2) + pow(accel->y, 2))) * 180 / PI;
   return y_rot;
+
 }
 
 
 Imu_rotation CalcTilt(Imu_accel* accel) {
-
   Imu_rotation tilt;
   tilt.roll = CalcRoll(accel);
   tilt.pitch = CalcPitch(accel);
   return tilt;
+
 }
 
 
 float CalcPkPk() {
-
   float minVal;
   float maxVal;
   uint8_t i = 2;
@@ -293,17 +354,18 @@ float CalcPkPk() {
     }
   }
   return (maxVal - minVal);
+
 }
 
 
 float FilterLowPass(float new_input, float old_output) {
   // IIR Low pass Filter y[n] = 0.90y[n-1] + 0.10x[n]
   return (0.9 * old_output + 0.10 * new_input);
+
 }
 
 
 uint16_t GetBufferPosition(uint16_t current_pos, int8_t samples) {
-
   int16_t buffer_pos = current_pos + samples;
   if (buffer_pos > BUFFER_LEN - 1) {
     buffer_pos -= BUFFER_LEN;
@@ -313,18 +375,19 @@ uint16_t GetBufferPosition(uint16_t current_pos, int8_t samples) {
     buffer_pos += BUFFER_LEN;
   }
   return (uint16_t) buffer_pos;
+
 }
 
 void blinkLED() {
-
   unsigned long current_time = millis();
-
   while (current_time + 2000 > millis()) {
     digitalWrite(LED_BUILTIN, HIGH);
     delay(200);
     digitalWrite(LED_BUILTIN, LOW);
     delay(200);
+
   }
 
   Serial.println("LED BLINKED");
+
 }
