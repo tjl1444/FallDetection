@@ -19,17 +19,15 @@
   - Develop interrupt based I2C driver for sensor
   - Reduce memory usage
 
-
-
 **/
 
 /************************* Defines *******************************************************/
-
 #define CONSTANT_G 9.81
 #define ACCEL_THRESHOLD  (1.82 * CONSTANT_G)
 #define SETTLE_THRESHOLD (0.30 * CONSTANT_G)
 #define ANGLE_THRESHOLD 40.0
 #define BUFFER_LEN 127
+#define SAMPLE_TIME_MS 40
 
 #define MAX_UINT16 1000
 #define MAX_INT16 1000
@@ -40,7 +38,6 @@
 #define OFFSET_Z 1.06;
 
 /************************* Structs ****************************************************************/
-
 typedef struct {
 
   float roll;
@@ -57,7 +54,6 @@ typedef struct {
 } Imu_accel;
 
 /************************* Function Prototypes ****************************************************/
-
 Imu_accel ReadAccel();
 Imu_rotation CalcTilt(Imu_accel* accel);
 Imu_rotation AverageRotation(uint16_t start_index, uint8_t samples);
@@ -67,11 +63,12 @@ float CalcPitch(Imu_accel* accel);
 float CalcHoriz_Mag(Imu_accel* accel);
 float CalcPkPk();
 float FilterLowPass(float new_input, float old_output);
-uint16_t GetBufferPosition(uint16_t currentPos, int8_t samples);
+uint16_t GetBufferPosition(uint16_t current_pos, int8_t samples);
 
 /************************* Main ****************************************************/
-
 Imu_rotation tilt[BUFFER_LEN];
+Imu_rotation current_orientation;
+
 float vector_mag[10] = {0.0};
 uint8_t mag_index = 0;
 
@@ -82,10 +79,8 @@ int16_t tilt_trigger = MAX_INT16;
 float y_rotF = 0.0;
 float z_rotF = 0.0;
 
-/* Assign a unique ID to this sensor at the same time */
+/* Assign a unique ID to ADXL345 */
 Adafruit_ADXL345_Unified adxl = Adafruit_ADXL345_Unified(12345);
-
-Imu_rotation current_orientation;
 
 void setup() {
 
@@ -99,13 +94,13 @@ void setup() {
   pinMode(LED_BUILTIN, OUTPUT);
 
   /* Initialise the ADXL345 */
-  while (!adxl.begin())
-  {
+  while (!adxl.begin()) {
+  
     /* Flash the LED a couple of times times then try again */
     blinkLED();
 
   }
-
+  // Initialise ADXL345 parameters
   adxl.setRange(ADXL345_RANGE_16_G);
   adxl.setDataRate(ADXL345_DATARATE_25_HZ);
 
@@ -118,7 +113,7 @@ void setup() {
 
 
 void loop() {
-  
+
   Imu_accel accel = ReadAccel();
   unsigned long current_time = millis();
 
@@ -130,7 +125,7 @@ void loop() {
     mag_index++;
   }
 
-  // Get Current Roll/Pitch angles then
+  // Get Current roll/pitch angles
   Imu_rotation filteredTilt;
   Imu_rotation currentTilt = CalcTilt(&accel);
 
@@ -147,6 +142,7 @@ void loop() {
 
   // Check if acceleration above the threshold
   if (accel_mag > ACCEL_THRESHOLD) {
+    
     mag_index = 0;
     accel_trigger = buffer_index;
     tilt_trigger = GetBufferPosition(accel_trigger, 60);
@@ -160,12 +156,11 @@ void loop() {
     Serial.print("Current Orientation is (Forward/Backward | Left/Right: ");
     Serial.print(current_orientation.pitch); Serial.print(" ");
     Serial.println(current_orientation.roll);
-
   }
 
   // Check if enough time has passed after the fall trigger
   if (buffer_index == tilt_trigger) {
-
+    
     // Check if signal has settled and calculate the change in orientation
     if (CalcPkPk() < SETTLE_THRESHOLD) {
       // Check change in orientation and send message on serial monitor that a fall has occured
@@ -183,7 +178,6 @@ void loop() {
       float roll_change = abs(new_orientation.roll - current_orientation.roll);
       float pitch_change = abs(new_orientation.pitch - current_orientation.pitch);
       
-
       if (pitch_change > roll_change) {
         orientation_change = pitch_change;
       }else {
@@ -193,47 +187,39 @@ void loop() {
       if (orientation_change > ANGLE_THRESHOLD) {
         // Fall Detected - Blink the LED
         blinkLED();
-
+        Serial.println("Fall Detected");
       }
-
-      // Reset accel_trigger and tilt_trigger to MAX value 
-      tilt_trigger = MAX_INT16;
-      accel_trigger = MAX_UINT16;
-
     }
 
+    // Reset trigger points
+    mag_index = 0;
+    tilt_trigger = MAX_INT16;
+    accel_trigger = MAX_UINT16;
   }
 
   buffer_index = GetBufferPosition(buffer_index, 1);
 
   // Wait 40ms until next sample
-  while(current_time + 40 < millis()) {
-  }
-
-
+  while((unsigned long)(millis() - current_time) <= SAMPLE_TIME_MS);
+  
 }
 
 
 /************************* Functions ***********************************************/
-
 Imu_rotation AverageRotation(uint16_t start_index, uint8_t samples) {
 
   Imu_rotation average_rot = {0.0, 0.0};
   uint8_t i = 0;
-
+  
   for (i = 0; i < samples; i++) {
     uint16_t tilt_index = GetBufferPosition(start_index, i);
     average_rot.roll += tilt[tilt_index].roll;
     average_rot.pitch += tilt[tilt_index].pitch;
-
   }
 
   average_rot.roll = average_rot.roll / samples;
   average_rot.pitch = average_rot.pitch / samples;
-
   return average_rot;
-
-
 }
 
 
@@ -248,38 +234,38 @@ Imu_accel ReadAccel() {
   accel.z = event.acceleration.z + OFFSET_Z;
 
   return accel;
-
 }
 
 
 float CalcHoriz_Mag(Imu_accel* accel) {
-  // For Prototype - Orientation --> X downwards, Y left/right, Z - towards you
-  float vector_mag = sqrt((accel->y * accel->y) + (accel->z * accel->z));
-  return vector_mag;
+
+  float horiz_mag = sqrt((accel->y * accel->y) + (accel->z * accel->z));
+  return horiz_mag;
 }
 
+
 float CalcRoll(Imu_accel* accel) {
-
-  // For SisFall Dataset - Orientation --> Y downwards, X left/right
-  // double z_rot = atan(-1 * X_out / sqrt(pow(Y_out, 2) + pow(Z_out, 2))) * 180 / PI;
-
-  // For Prototype - Orientation --> X downwards, Y left/right
+  
   float z_rot = atan(-1 * accel->y / sqrt(pow(accel->x, 2) + pow(accel->z, 2))) * 180 / PI;
   return z_rot;
-
 }
 
 
 float CalcPitch(Imu_accel* accel) {
 
-  // For SisFall Dataset Orientation - Y downwards, X left/right
-  // float x_rot = atan(-1 * Z_out / sqrt(pow(X_out, 2) + pow(Y_out, 2))) * 180 / PI;
-
-  // For Prototype Orientation - X downwards, Y left/right
   float y_rot = atan(-1 * accel->z / sqrt(pow(accel->x, 2) + pow(accel->y, 2))) * 180 / PI;
   return y_rot;
-
 }
+
+
+Imu_rotation CalcTilt(Imu_accel* accel) {
+
+  Imu_rotation tilt;
+  tilt.roll = CalcRoll(accel);
+  tilt.pitch = CalcPitch(accel);
+  return tilt;
+}
+
 
 float CalcPkPk() {
 
@@ -305,20 +291,8 @@ float CalcPkPk() {
     else if (vector_mag[i] < minVal) {
       minVal = vector_mag[i];
     }
-
   }
-
   return (maxVal - minVal);
-}
-
-
-Imu_rotation CalcTilt(Imu_accel* accel) {
-
-  Imu_rotation tilt;
-  tilt.roll = CalcRoll(accel);
-  tilt.pitch = CalcPitch(accel);
-  return tilt;
-
 }
 
 
@@ -328,21 +302,17 @@ float FilterLowPass(float new_input, float old_output) {
 }
 
 
-uint16_t GetBufferPosition(uint16_t currentPos, int8_t samples) {
+uint16_t GetBufferPosition(uint16_t current_pos, int8_t samples) {
 
-  int16_t bufferPos = currentPos + samples;
-
-  if (bufferPos > BUFFER_LEN - 1) {
-    bufferPos -= BUFFER_LEN;
+  int16_t buffer_pos = current_pos + samples;
+  if (buffer_pos > BUFFER_LEN - 1) {
+    buffer_pos -= BUFFER_LEN;
   }
 
-  if (bufferPos < 0) {
-    bufferPos += BUFFER_LEN;
-
+  if (buffer_pos < 0) {
+    buffer_pos += BUFFER_LEN;
   }
-
-  return (uint16_t) bufferPos;
-
+  return (uint16_t) buffer_pos;
 }
 
 void blinkLED() {
@@ -357,6 +327,4 @@ void blinkLED() {
   }
 
   Serial.println("LED BLINKED");
-
-
 }
