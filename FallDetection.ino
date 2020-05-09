@@ -5,7 +5,7 @@
 /**
 
    Code Written By: Tendai Makumire
-   Last Updated: 08-May-2020
+   Last Updated: 09-May-2020
 
   Code Description:
   Code for wearable(on the waist) device designed to detect falls. Uses the ADXL345
@@ -15,7 +15,8 @@
 
   TODO:
   - Use proper MAX values for checks
-  - Automatic Calibration using Magnetometer
+  - Automatic Calibration using Magnetometer 
+  - Improve Orientation estimate with gyroscope
   - Develop interrupt based I2C driver for sensor
   - Reduce memory usage
 
@@ -76,20 +77,20 @@ uint16_t GetBufferPosition(uint16_t current_pos, int8_t samples);
 
 /************************* Global Variables ***********************************************/
 States mState;
-Imu_rotation tilt[BUFFER_LEN];
-Imu_rotation current_orientation;
+Imu_rotation mTilt[BUFFER_LEN];
+Imu_rotation mCurrent_orientation;
 
-float vector_mag[10] = {0.0};
-uint8_t mag_index = 0;
+float mVector_mag[10] = {0.0};
+uint8_t mMag_index = 0;
 
-uint16_t buffer_index = 0;
-uint16_t accel_trigger = MAX_UINT16;
-int16_t tilt_trigger = MAX_INT16;
+uint16_t mBuffer_index = 0;
+uint16_t mAccel_trigger = MAX_UINT16;
+int16_t mTilt_trigger = MAX_INT16;
 
-float y_rotF = 0.0;
-float z_rotF = 0.0;
+float mY_rotF = 0.0;
+float mZ_rotF = 0.0;
 
-unsigned long current_time;
+unsigned long mCurrent_time;
 Adafruit_ADXL345_Unified adxl = Adafruit_ADXL345_Unified(1);
 
 /************************* Main ****************************************************/
@@ -116,10 +117,10 @@ void setup() {
 
   // Set initial values for orientation
   Imu_accel initAccel = ReadAccel();
-  tilt[buffer_index] = CalcTilt(&initAccel);
-  buffer_index++;
+  mTilt[mBuffer_index] = CalcTilt(&initAccel);
+  mBuffer_index++;
 
-  current_time = millis();
+  mCurrent_time = millis();
 
   // Start measuring accel 
   mState = stateMeasureAccel;
@@ -129,22 +130,21 @@ void setup() {
 
 void loop() {
   
-  
   switch(mState) {
 
   case stateMeasureAccel:
   {
     // Wait 40ms until next sample
-    while((unsigned long)(millis() - current_time) <= SAMPLE_TIME_MS);
+    while((unsigned long)(millis() - mCurrent_time) <= SAMPLE_TIME_MS);
     Imu_accel accel = ReadAccel();
-    current_time = millis();
+    mCurrent_time = millis();
 
     // Calculate Horizontal acceleration vector magnitude
     float accel_mag = CalcHoriz_Mag(&accel);
 
-    if (buffer_index > accel_trigger + 50) {
-        vector_mag[mag_index] = accel_mag;
-        mag_index++;
+    if (mBuffer_index > mAccel_trigger + 50) {
+        mVector_mag[mMag_index] = accel_mag;
+        mMag_index++;
     }
 
     // Get Current roll/pitch angles
@@ -152,15 +152,15 @@ void loop() {
     Imu_rotation currentTilt = CalcTilt(&accel);
 
     // Apply Low Pass IIR Filter to roll/pitch angles
-    y_rotF = FilterLowPass(currentTilt.pitch, y_rotF);
-    z_rotF = FilterLowPass(currentTilt.roll, z_rotF);
-    filteredTilt.roll = z_rotF;
-    filteredTilt.pitch = y_rotF;
-    tilt[buffer_index] = filteredTilt;
+    mY_rotF = FilterLowPass(currentTilt.pitch, mY_rotF);
+    mZ_rotF = FilterLowPass(currentTilt.roll, mZ_rotF);
+    filteredTilt.roll = mZ_rotF;
+    filteredTilt.pitch = mY_rotF;
+    mTilt[mBuffer_index] = filteredTilt;
 
     /* ------------ DEBUG Roll and Pitch  ------------*/
-    Serial.print(tilt[buffer_index].pitch); Serial.print(" ");
-    Serial.println(tilt[buffer_index].roll);
+    Serial.print(mTilt[mBuffer_index].pitch); Serial.print(" ");
+    Serial.println(mTilt[mBuffer_index].roll);
 
     // Check if acceleration above the threshold
     if (accel_mag > ACCEL_THRESHOLD) {
@@ -168,28 +168,27 @@ void loop() {
     }
 
     // Check if enough time has passed after the fall trigger
-    if (buffer_index == tilt_trigger) {
+    if (mBuffer_index == mTilt_trigger) {
       mState = stateCheckSignal;
     }
-
     break;
   }
 
   case stateSetTriggers:
   {
-    mag_index = 0;
-    accel_trigger = buffer_index;
-    tilt_trigger = GetBufferPosition(accel_trigger, 60);
+    mMag_index = 0;
+    mAccel_trigger = mBuffer_index;
+    mTilt_trigger = GetBufferPosition(mAccel_trigger, 60);
 
     // Get Orientation 2.4s before acceleration trigger and set as current Orientation
     // Take an average of the samples before from -2.4s to -2.0s
-    uint16_t index = GetBufferPosition(accel_trigger, -60);
-    current_orientation = AverageRotation(index, 10);
+    uint16_t index = GetBufferPosition(mAccel_trigger, -60);
+    mCurrent_orientation = AverageRotation(index, 10);
 
     /* ------------ DEBUG Roll and Pitch after High Accel  ------------*/
     Serial.print("Current Orientation is (Forward/Backward | Left/Right: ");
-    Serial.print(current_orientation.pitch); Serial.print(" ");
-    Serial.println(current_orientation.roll);
+    Serial.print(mCurrent_orientation.pitch); Serial.print(" ");
+    Serial.println(mCurrent_orientation.roll);
 
     // Go back to measuring the accel
     mState = stateMeasureAccel;
@@ -213,9 +212,9 @@ void loop() {
 
   case stateResetTriggers:
   {
-    mag_index = 0;
-    tilt_trigger = MAX_INT16;
-    accel_trigger = MAX_UINT16;
+    mMag_index = 0;
+    mTilt_trigger = MAX_INT16;
+    mAccel_trigger = MAX_UINT16;
 
     // Continue measuring accel
     mState = stateMeasureAccel;
@@ -224,7 +223,7 @@ void loop() {
 
   case stateCheckOrientation:
   {
-    uint16_t index = GetBufferPosition(buffer_index, -10);
+    uint16_t index = GetBufferPosition(mBuffer_index, -10);
     Imu_rotation new_orientation = AverageRotation(index, 10);
 
     /* ------------ DEBUG Roll and Pitch after High Accel  ------------*/
@@ -233,8 +232,8 @@ void loop() {
     Serial.println(new_orientation.roll);
 
     float orientation_change; 
-    float roll_change = abs(new_orientation.roll - current_orientation.roll);
-    float pitch_change = abs(new_orientation.pitch - current_orientation.pitch);
+    float roll_change = abs(new_orientation.roll - mCurrent_orientation.roll);
+    float pitch_change = abs(new_orientation.pitch - mCurrent_orientation.pitch);
     
     if (pitch_change > roll_change) {
       orientation_change = pitch_change;
@@ -263,9 +262,11 @@ void loop() {
 
   }
 
-  // Get next buffer index
-  buffer_index = GetBufferPosition(buffer_index, 1);
-  
+  // Increment buffer index only if we are about measure the acceleration 
+  if (mState == stateMeasureAccel) {
+    mBuffer_index = GetBufferPosition(mBuffer_index, 1);  
+  }
+   
 }
 
 /************************* Functions ***********************************************/
@@ -275,8 +276,8 @@ Imu_rotation AverageRotation(uint16_t start_index, uint8_t samples) {
   
   for (i = 0; i < samples; i++) {
     uint16_t tilt_index = GetBufferPosition(start_index, i);
-    average_rot.roll += tilt[tilt_index].roll;
-    average_rot.pitch += tilt[tilt_index].pitch;
+    average_rot.roll += mTilt[tilt_index].roll;
+    average_rot.pitch += mTilt[tilt_index].pitch;
   }
 
   average_rot.roll = average_rot.roll / samples;
@@ -295,14 +296,15 @@ Imu_accel ReadAccel() {
   accel.x = event.acceleration.x + OFFSET_X;
   accel.y = event.acceleration.y + OFFSET_Y;
   accel.z = event.acceleration.z + OFFSET_Z;
-
   return accel;
+  
 }
 
 
 float CalcHoriz_Mag(Imu_accel* accel) {
   float horiz_mag = sqrt((accel->y * accel->y) + (accel->z * accel->z));
   return horiz_mag;
+  
 }
 
 
@@ -330,27 +332,18 @@ Imu_rotation CalcTilt(Imu_accel* accel) {
 
 
 float CalcPkPk() {
-  float minVal;
-  float maxVal;
-  uint8_t i = 2;
-
-  // Initialise Min/Max
-  if (vector_mag[1] > vector_mag[0]) {
-    maxVal = vector_mag[1];
-    minVal = vector_mag[0];
-  } else {
-    maxVal = vector_mag[0];
-    minVal = vector_mag[1];
-  }
+  float minVal = mVector_mag[0];
+  float maxVal = mVector_mag[0];
+  uint8_t i;
 
   // Find Min/Max in array
-  for (i = 2; i < 10; i++) {
+  for (i = 1; i < 10; i++) {
 
-    if (vector_mag[i] > maxVal) {
-      maxVal = vector_mag[i];
+    if (mVector_mag[i] > maxVal) {
+      maxVal = mVector_mag[i];
     }
-    else if (vector_mag[i] < minVal) {
-      minVal = vector_mag[i];
+    else if (mVector_mag[i] < minVal) {
+      minVal = mVector_mag[i];
     }
   }
   return (maxVal - minVal);
@@ -378,6 +371,7 @@ uint16_t GetBufferPosition(uint16_t current_pos, int8_t samples) {
 
 }
 
+
 void blinkLED() {
   unsigned long current_time = millis();
   while (current_time + 2000 > millis()) {
@@ -387,7 +381,6 @@ void blinkLED() {
     delay(200);
 
   }
-
   Serial.println("LED BLINKED");
 
 }
